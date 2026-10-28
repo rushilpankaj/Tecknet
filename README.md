@@ -39,6 +39,18 @@ Uninstall from Windows Settings → Apps.
 
 Nothing else is needed: no Python, no AutoHotkey.
 
+The installer is not code-signed, so Windows SmartScreen may show
+"Windows protected your PC". Choose **More info → Run anyway**. To check that
+the file is the one published here, compare its SHA-256 (shown on the release
+page) with:
+
+```powershell
+Get-FileHash .\TecknetControl-Setup-1.7.0.exe -Algorithm SHA256
+```
+
+Updating: run the new installer. It closes the running app first and keeps
+your settings.
+
 ## Privacy and safety
 
 - No telemetry, no network access, no administrator rights.
