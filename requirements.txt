@@ -1,0 +1,5 @@
+customtkinter>=5.2
+pystray>=0.19
+pillow>=10.0
+winrt-Windows.Devices.Bluetooth>=3.2
+winrt-Windows.Foundation>=3.2
