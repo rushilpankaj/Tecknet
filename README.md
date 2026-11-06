@@ -20,6 +20,13 @@ and shows the connection and battery level.
   action such as Play / Pause, Mute, Task View, Show Desktop or Screenshot.
   Press a side button and its rows light up in the window, so you know which
   is which. The double-click wait is adjustable.
+- **Hold and gestures**: holding a side button can run an action, slow the
+  pointer down for precise work (Precision mode), or turn the button into a
+  gesture button: hold it and move the mouse left, right, up or down.
+- **App profiles**: the side wheel can do something different in each
+  program, e.g. switch tabs in Chrome and change the volume everywhere else.
+- **Faster volume**: turning the side wheel quickly moves the volume in
+  bigger steps.
 - **Device status**: Bluetooth connection with battery level, and the
   2.4 GHz USB receiver (shown as connected only while the mouse is in use).
   Optional notification when the battery is low.
@@ -45,7 +52,7 @@ the file is the one published here, compare its SHA-256 (shown on the release
 page) with:
 
 ```powershell
-Get-FileHash .\TecknetControl-Setup-1.7.0.exe -Algorithm SHA256
+Get-FileHash .\TecknetControl-Setup-<version>.exe -Algorithm SHA256
 ```
 
 Updating: run the new installer. It closes the running app first and keeps
@@ -69,14 +76,15 @@ Windows removes it automatically if the app closes or crashes.
 
 | File | What it does |
 |---|---|
-| `tecknet_control/app.py` | main window |
-| `tecknet_control/ui/` | look (`theme.py`), side wheel and button cards, app picker, shortcut recorder |
+| `tecknet_control/app.py` | main window: puts the cards together |
+| `tecknet_control/ui/` | look (`theme.py`), the cards, app picker, shortcut recorder |
+| `tecknet_control/pointer_speed.py` | precision mode (slower pointer while a button is held) |
 | `tecknet_control/actions.py` | list of actions and wheel presets (add new ones here) |
 | `tecknet_control/engine.py` | decides what each wheel tilt or click does (no Windows calls; tested) |
 | `tecknet_control/input_hook.py` | mouse hook, Raw Input, timers |
 | `tecknet_control/devices.py` | Bluetooth connection, battery, USB receiver |
 | `tecknet_control/config.py` | settings and their defaults |
-| `tecknet_control/system.py` | single instance, start with Windows, clean-up of v1.6 |
+| `tecknet_control/system.py` | single instance, start with Windows |
 
 ## Run from source
 
@@ -106,6 +114,12 @@ This runs the tests, builds `dist\TecknetControl\` with PyInstaller and, if
 The app is made for the TK-MS029, but the controls work with any mouse that has
 a horizontal wheel or side buttons: under *App*, choose *Add mouse* and tilt
 its wheel. Connection and battery status are shown for the TK-MS029 only.
+
+## Contributing
+
+Ideas and fixes are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains how
+the code is organised, where to change the most common things and the rules
+that keep the app simple and safe.
 
 ## License
 

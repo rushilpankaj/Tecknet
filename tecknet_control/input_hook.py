@@ -15,7 +15,8 @@ from ctypes import wintypes
 
 from . import actions, winapi
 from .device_ids import device_id, transport
-from .engine import DOUBLE_TIMER, FLUSH_TIMER, EngineConfig, InputEngine
+from .engine import DOUBLE_TIMER, FLUSH_TIMER, HOLD_TIMER, EngineConfig, InputEngine
+from .pointer_speed import PointerSpeed
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,10 @@ class InputThread:
         self.identify_callback = None  # called once with (device id, transport)
         self.side_button_callback = None  # called with 1 or 2 when a TECKNET side button is pressed
         self._config = EngineConfig()
+        self._front_window = None
+        self._front_app = ""
+        self.pointer = PointerSpeed()
+        self._raw_up_at = {1: 0.0, 2: 0.0}  # last side-button release seen by Raw Input
         self._effects = deque()
         self._effects_posted = False
         self._devices = {}
@@ -81,6 +86,33 @@ class InputThread:
     def kill_timer(self, timer_id):
         winapi.user32.KillTimer(self._hwnd, timer_id)
 
+    def foreground_app(self):
+        """File name of the program in front ("chrome.exe"), cached per window."""
+        window = winapi.user32.GetForegroundWindow()
+        if window != self._front_window:
+            self._front_window = window
+            self._front_app = winapi.window_program(window)
+        return self._front_app
+
+    def precision(self, on):
+        """Slow the pointer while a precision button is held; restore after."""
+        if on:
+            self.pointer.slow_down()
+        else:
+            self.pointer.restore()
+
+    def _check_precision(self):
+        """If the button release was lost, Raw Input still saw it: turn precision off."""
+        if not self.pointer.active:
+            return
+        now = time.monotonic()
+        released = [t for t in self._raw_up_at.values() if self.pointer.slowed_at < t < now - 1]
+        if released:
+            log.warning("Missed a button release; leaving precision mode")
+            self.engine.cancel_holds()
+            self._run_effects()
+            self.precision(False)
+
     def post(self, effect):
         self._effects.append(effect)
         if not self._effects_posted:
@@ -103,6 +135,7 @@ class InputThread:
         device = winapi.RAWINPUTDEVICE(1, 2, winapi.RIDEV_INPUTSINK, self._hwnd)  # generic desktop / mouse
         if not winapi.user32.RegisterRawInputDevices(ctypes.byref(device), 1, ctypes.sizeof(device)):
             log.error("Raw Input registration failed (error %s)", ctypes.get_last_error())
+        self.pointer.restore_after_crash()
         self._apply_config()
         self._ready.set()
         message = wintypes.MSG()
@@ -115,9 +148,10 @@ class InputThread:
         config = self._config
         self.engine.configure(config)
         wanted = config.enabled and (
-            config.wheel is not None
+            self.engine.wheel_active()
             or any(config.double_click.values())
             or any(config.single_click.values())
+            or any(config.hold.values())
         )
         if wanted and not self._hook:
             self._install_hook()
@@ -149,6 +183,7 @@ class InputThread:
         silent = self._hook_calls == self._watchdog_calls
         self._watchdog_cursor = cursor
         self._watchdog_calls = self._hook_calls
+        self._check_precision()
         if self._hook and moved and silent:
             log.warning("Mouse hook stopped responding; reinstalling")
             winapi.user32.UnhookWindowsHookEx(self._hook)
@@ -180,10 +215,11 @@ class InputThread:
             return blocked
         if injected:
             return False  # sent by a program (including this one): leave it alone
+        position = (info.pt.x, info.pt.y)
         if message == winapi.WM_XBUTTONDOWN:
-            return self.engine.on_button_down(high_word)
+            return self.engine.on_button_down(high_word, position)
         if message == winapi.WM_XBUTTONUP:
-            return self.engine.on_button_up(high_word)
+            return self.engine.on_button_up(high_word, position)
         return False
 
     def _on_message(self, hwnd, message, wparam, lparam):
@@ -204,6 +240,7 @@ class InputThread:
             elif message == winapi.WM_CLOSE:
                 self.engine.flush_all()
                 self._run_effects()
+                self.precision(False)  # never leave the pointer slowed down
                 self._remove_hook()
                 winapi.user32.DestroyWindow(hwnd)
                 return 0
@@ -220,9 +257,11 @@ class InputThread:
         elif timer_id == WATCHDOG_TIMER:
             self._check_hook()
         else:
-            for button, button_timer in DOUBLE_TIMER.items():
-                if timer_id == button_timer:
+            for button in DOUBLE_TIMER:
+                if timer_id == DOUBLE_TIMER[button]:
                     self.engine.on_double_timer(button)
+                elif timer_id == HOLD_TIMER[button]:
+                    self.engine.on_hold_timer(button)
 
     def _device(self, handle):
         known = self._devices.get(handle)
@@ -247,6 +286,10 @@ class InputThread:
         if from_target:
             self.last_activity[kind] = now
         flags = raw.mouse.usButtonFlags
+        if flags & winapi.RI_MOUSE_BUTTON_4_UP:
+            self._raw_up_at[1] = now
+        if flags & winapi.RI_MOUSE_BUTTON_5_UP:
+            self._raw_up_at[2] = now
         if flags & winapi.RI_MOUSE_HWHEEL:
             log.debug("raw wheel %+d from %s (%s)", ctypes.c_short(raw.mouse.usButtonData).value, identifier or "?", "TECKNET" if from_target else "other")
             self.engine.on_raw_wheel(from_target, now)

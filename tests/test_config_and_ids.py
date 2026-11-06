@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from tecknet_control import actions, config, system
+from tecknet_control.engine import GESTURES, PRECISION
 from tecknet_control.device_ids import device_id, transport
 
 USB_MOUSE = r"\\?\HID#VID_25A7&PID_FA61&MI_01&COL01#7&75A1477&0&0000#{378DE44C-56EF-11D1-BC8C-00A0C91405DD}"
@@ -38,24 +39,24 @@ class SettingsTest(unittest.TestCase):
             self.addCleanup(patch.stop)
         self.addCleanup(self.folder.cleanup)
 
-    def test_v16_settings_are_converted(self):
+    def test_buttons_and_programs(self):
         app = Path(self.folder.name) / "Tool.exe"
         app.write_bytes(b"MZ")
         self.file.write_text(json.dumps({
-            "wheel_left": "Volume Down", "wheel_right": "Volume Up", "wheel_preset": "Zoom",
-            "xbutton1_double": "Open Program...", "custom_xbutton1": str(app), "custom_xbutton1_name": "",
-            "xbutton2_double": "Spotify", "custom_xbutton2": r"C:\old.lnk",
-            "enable_controls": False, "theme": "Dark",
+            "wheel_preset": "Zoom", "enable_controls": False, "theme": "Dark",
+            "xbutton1_double": "Copy",  # old v1.6 key: ignored
+            "buttons": {
+                "1_double": {"action": "Open Program...", "program": str(app)},
+                "2_double": {"action": "Spotify", "program": r"C:\old.lnk"},
+            },
         }), encoding="utf-8")
         settings = config.load_settings()
         self.assertEqual(settings["wheel_preset"], "Zoom")
         slots = settings["buttons"]
-        self.assertEqual(slots["1_double"]["program_name"], "Tool")
-        self.assertEqual(slots["2_double"]["program"], "")  # leftover program dropped
+        self.assertEqual(slots["1_double"]["program_name"], "Tool")  # name taken from the file
+        self.assertEqual(slots["2_double"]["program"], "")  # program only kept for Open Program
         self.assertEqual(slots["1_click"]["action"], actions.NORMAL_CLICK)
         self.assertFalse(settings["enable_controls"])
-        self.assertEqual(settings["theme"], "Dark")
-        self.assertNotIn("wheel_left", settings)
         self.assertNotIn("xbutton1_double", settings)
         engine = config.engine_config(settings)
         self.assertEqual(engine.wheel, (actions.Binding("Zoom Out"), actions.Binding("Zoom In")))
@@ -100,6 +101,30 @@ class SettingsTest(unittest.TestCase):
         settings["buttons"]["1_click"] = {"action": actions.DO_NOTHING}
         self.assertEqual(config.slot_binding(settings, "1_click"), actions.Binding(actions.DO_NOTHING))
 
+    def test_hold_gestures_and_profiles(self):
+        settings = config.load_settings()
+        self.assertIsNone(config.engine_config(settings).hold[1])  # off by default
+        settings["buttons"]["1_hold"] = {"action": actions.HOLD_GESTURES}
+        settings["buttons"]["2_hold"] = {"action": actions.HOLD_PRECISION}
+        settings["buttons"]["gesture_down"] = {"action": actions.DO_NOTHING}
+        settings["app_profiles"] = [
+            {"app": "Chrome.exe", "wheel": "Navigate Tabs"},
+            {"app": "chrome.exe", "wheel": "Zoom"},  # duplicate dropped
+            {"app": "..\\evil.exe", "wheel": "Zoom"},  # not a plain file name
+            {"app": "game.exe", "wheel": "Horizontal Scroll"},
+            {"app": "x.exe", "wheel": "Copy/Paste"},
+        ]
+        config.save_settings(settings)
+        loaded = config.load_settings()
+        self.assertEqual([p["app"] for p in loaded["app_profiles"]], ["chrome.exe", "game.exe"])
+        engine = config.engine_config(loaded)
+        self.assertEqual(engine.hold, {1: GESTURES, 2: PRECISION})
+        self.assertEqual(engine.gestures["right"], actions.Binding("Next Track"))
+        self.assertIsNone(engine.gestures["down"])
+        self.assertEqual(engine.wheel_by_app["chrome.exe"], (actions.Binding("Previous Tab"), actions.Binding("Next Tab")))
+        self.assertIsNone(engine.wheel_by_app["game.exe"])
+        self.assertIn(actions.Binding("Volume Up"), engine.accelerated)
+
     def test_damaged_file_uses_defaults(self):
         self.file.write_text("{not json", encoding="utf-8")
         self.assertEqual(config.load_settings()["wheel_preset"], "Volume")
@@ -129,27 +154,6 @@ class ProgramValidationTest(unittest.TestCase):
             self.assertFalse(actions.valid_program(r"\\server\share\a.exe"))
             self.assertFalse(actions.valid_program(str(Path(folder) / "missing.exe")))
             self.assertFalse(actions.valid_program(None))
-
-
-class LegacyScriptTest(unittest.TestCase):
-    generated = r"C:\Users\x\AppData\Roaming\TecknetControl\tecknet_controls.ahk"
-
-    def test_only_tecknet_scripts_match(self):
-        match = system.is_tecknet_script
-        self.assertTrue(match(rf'"C:\AHK\AutoHotkey64.exe" {self.generated}', self.generated))
-        self.assertTrue(match(r'"AutoHotkey64.exe" "C:\Docs\AutoHotkey\mouse_test.ahk"', self.generated))
-        self.assertTrue(match(r'AutoHotkey64.exe C:\Docs\AutoHotkey\mouse_teste.ahk', self.generated))
-        self.assertFalse(match(r'AutoHotkey64.exe "C:\Docs\my_mouse_test.ahk"', self.generated))
-        self.assertFalse(match(r'AutoHotkey64.exe "C:\Docs\mouse_test.ahk.bak"', self.generated))
-        self.assertFalse(match(r'AutoHotkey64.exe "C:\Docs\shortcuts.ahk"', self.generated))
-
-    def test_reads_own_command_line(self):
-        import ctypes
-        handle = system.kernel32.OpenProcess(system.PROCESS_QUERY_LIMITED_INFORMATION, False, __import__("os").getpid())
-        try:
-            self.assertIn("python", system._command_line(handle).lower())
-        finally:
-            system.kernel32.CloseHandle(handle)
 
 
 class KeyInputTest(unittest.TestCase):

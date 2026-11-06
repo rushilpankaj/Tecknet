@@ -8,11 +8,12 @@ so a damaged file never stops the app.
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 from . import actions
 from .device_ids import TECKNET_IDS
-from .engine import EngineConfig
+from .engine import GESTURES, PRECISION, EngineConfig
 
 log = logging.getLogger(__name__)
 
@@ -21,30 +22,46 @@ SETTINGS_FILE = APP_DIR / "settings.json"
 LOG_FILE = APP_DIR / "tecknet_control.log"
 
 THEMES = ("System", "Light", "Dark")
-WHEEL_TARGETS = ("TECKNET mouse only", "All devices")
 DOUBLE_CLICK_RANGE = (150, 600)
-SETTINGS_VERSION = 3
+SETTINGS_VERSION = 4
+MAX_APP_PROFILES = 20
+_PROGRAM_NAME = re.compile(r"^[\w .()+&-]{1,80}\.exe$")
 
-# Side-button slots: button 1 (Back) and 2 (Forward), click and double click.
-SLOTS = ("1_click", "1_double", "2_click", "2_double")
+# Side-button slots: button 1 (Back) and 2 (Forward) click, double click and
+# hold, and the four gesture directions (shared by both buttons).
+GESTURE_DIRECTIONS = ("left", "right", "up", "down")
+SLOTS = ("1_click", "1_double", "1_hold", "2_click", "2_double", "2_hold") + tuple(
+    f"gesture_{direction}" for direction in GESTURE_DIRECTIONS
+)
 CUSTOM_ACTIONS = [actions.OPEN_PROGRAM, actions.SHORTCUT]
+_WITHOUT_NOTHING = [a for a in actions.BUTTON_ACTIONS if a != actions.DO_NOTHING]
 SLOT_ACTIONS = {
     "click": [actions.NORMAL_CLICK] + actions.BUTTON_ACTIONS + CUSTOM_ACTIONS,
     "double": actions.BUTTON_ACTIONS + CUSTOM_ACTIONS,
+    "hold": [actions.DO_NOTHING, actions.HOLD_GESTURES, actions.HOLD_PRECISION] + _WITHOUT_NOTHING + CUSTOM_ACTIONS,
+    "gesture": actions.BUTTON_ACTIONS + CUSTOM_ACTIONS,
 }
 DEFAULT_SLOT_ACTIONS = {
     "1_click": actions.NORMAL_CLICK,
     "1_double": "Calculator",
+    "1_hold": actions.DO_NOTHING,
     "2_click": actions.NORMAL_CLICK,
     "2_double": "Spotify",
+    "2_hold": actions.DO_NOTHING,
+    "gesture_left": "Previous Track",
+    "gesture_right": "Next Track",
+    "gesture_up": "Maximize Window",
+    "gesture_down": "Minimize Window",
 }
+# Repeated when the side wheel is turned quickly (see engine.ACCELERATION).
+ACCELERATED_ACTIONS = ("Volume Down", "Volume Up")
 
 DEFAULTS = {
     "settings_version": SETTINGS_VERSION,
     "enable_controls": True,
     "wheel_preset": "Volume",
+    "wheel_acceleration": True,
     "invert_wheel": False,
-    "wheel_target": WHEEL_TARGETS[0],
     "device_ids": list(TECKNET_IDS),
     "double_click_ms": 280,
     "start_with_windows": False,
@@ -59,19 +76,24 @@ def empty_slot(action):
 
 
 def slot_kind(slot):
-    return slot.split("_")[1]
+    """"click", "double", "hold" or "gesture"."""
+    return "gesture" if slot.startswith("gesture_") else slot.split("_")[1]
 
 
-def _from_v16(data):
-    """v1.6 kept the side buttons in flat keys; turn them into slots."""
-    slots = {}
-    for button in (1, 2):
-        double = empty_slot(data.get(f"xbutton{button}_double", DEFAULT_SLOT_ACTIONS[f"{button}_double"]))
-        double["program"] = data.get(f"custom_xbutton{button}", "")
-        double["program_name"] = data.get(f"custom_xbutton{button}_name", "")
-        slots[f"{button}_double"] = double
-        slots[f"{button}_click"] = empty_slot(data.get(f"xbutton{button}_single", actions.NORMAL_CLICK))
-    return slots
+def _clean_profiles(raw):
+    """[{"app": "chrome.exe", "wheel": "Navigate Tabs"}, ...]: one per app."""
+    profiles, seen = [], set()
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        app = item.get("app")
+        wheel = item.get("wheel")
+        if not isinstance(app, str) or not _PROGRAM_NAME.match(app.lower()) or wheel not in actions.WHEEL_PRESETS:
+            continue
+        if app.lower() not in seen and len(profiles) < MAX_APP_PROFILES:
+            seen.add(app.lower())
+            profiles.append({"app": app.lower(), "wheel": wheel})
+    return profiles
 
 
 def _clean_slot(slot, raw):
@@ -114,8 +136,6 @@ def _clean(data):
 
     if settings["wheel_preset"] not in actions.WHEEL_PRESETS:
         settings["wheel_preset"] = DEFAULTS["wheel_preset"]
-    if settings["wheel_target"] not in WHEEL_TARGETS:
-        settings["wheel_target"] = DEFAULTS["wheel_target"]
     if settings["theme"] not in THEMES:
         settings["theme"] = DEFAULTS["theme"]
     if not settings["device_ids"]:
@@ -123,10 +143,9 @@ def _clean(data):
     low, high = DOUBLE_CLICK_RANGE
     settings["double_click_ms"] = max(low, min(high, settings["double_click_ms"]))
 
-    raw_slots = data.get("buttons")
-    if not isinstance(raw_slots, dict):
-        raw_slots = _from_v16(data)
+    raw_slots = data.get("buttons") if isinstance(data.get("buttons"), dict) else {}
     settings["buttons"] = {slot: _clean_slot(slot, raw_slots.get(slot)) for slot in SLOTS}
+    settings["app_profiles"] = _clean_profiles(data.get("app_profiles"))
     settings["settings_version"] = SETTINGS_VERSION
     return settings
 
@@ -156,8 +175,12 @@ def slot_binding(settings, slot):
     name = data["action"]
     if name == actions.NORMAL_CLICK:
         return None
-    if name == actions.DO_NOTHING and slot_kind(slot) == "double":
-        return None
+    if name == actions.DO_NOTHING and slot_kind(slot) != "click":
+        return None  # a click set to Do Nothing still blocks the click
+    if name == actions.HOLD_GESTURES:
+        return GESTURES
+    if name == actions.HOLD_PRECISION:
+        return PRECISION
     if name == actions.OPEN_PROGRAM:
         if not actions.valid_program(data["program"]):
             return None
@@ -167,13 +190,21 @@ def slot_binding(settings, slot):
     return actions.Binding(name)
 
 
+def wheel_bindings(preset):
+    pair = actions.WHEEL_PRESETS[preset]
+    return None if pair is None else tuple(actions.Binding(name) for name in pair)
+
+
 def engine_config(settings):
-    pair = actions.WHEEL_PRESETS[settings["wheel_preset"]]
+    accelerated = ACCELERATED_ACTIONS if settings["wheel_acceleration"] else ()
     return EngineConfig(
         enabled=settings["enable_controls"],
-        wheel=None if pair is None else tuple(actions.Binding(name) for name in pair),
+        wheel=wheel_bindings(settings["wheel_preset"]),
+        wheel_by_app={p["app"]: wheel_bindings(p["wheel"]) for p in settings["app_profiles"]},
         invert_wheel=settings["invert_wheel"],
-        only_target_devices=settings["wheel_target"] == WHEEL_TARGETS[0],
+        accelerated=frozenset(actions.Binding(name) for name in accelerated),
+        hold={b: slot_binding(settings, f"{b}_hold") for b in (1, 2)},
+        gestures={d: slot_binding(settings, f"gesture_{d}") for d in GESTURE_DIRECTIONS},
         target_ids=frozenset(settings["device_ids"]),
         single_click={b: slot_binding(settings, f"{b}_click") for b in (1, 2)},
         double_click={b: slot_binding(settings, f"{b}_double") for b in (1, 2)},

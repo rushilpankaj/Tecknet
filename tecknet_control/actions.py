@@ -24,8 +24,11 @@ VK_TAB = 0x09
 VK_SHIFT = 0x10
 VK_CONTROL = 0x11
 VK_MENU = 0x12
+VK_ESCAPE = 0x1B
 VK_LEFT = 0x25
+VK_UP = 0x26
 VK_RIGHT = 0x27
+VK_DOWN = 0x28
 VK_C = 0x43
 VK_D = 0x44
 VK_S = 0x53
@@ -65,6 +68,9 @@ KEY_ACTIONS = {
     "Next Tab": (VK_CONTROL, VK_TAB),
     "Previous Desktop": (VK_CONTROL, VK_LWIN, VK_LEFT),
     "Next Desktop": (VK_CONTROL, VK_LWIN, VK_RIGHT),
+    "Maximize Window": (VK_LWIN, VK_UP),
+    "Minimize Window": (VK_LWIN, VK_DOWN),
+    "Task Manager": (VK_CONTROL, VK_SHIFT, VK_ESCAPE),
     "Task View": (VK_LWIN, VK_TAB),
     "Show Desktop": (VK_LWIN, VK_D),
     "Screenshot": (VK_LWIN, VK_SHIFT, VK_S),
@@ -84,6 +90,8 @@ LAUNCH_ACTIONS = {
 
 NORMAL_CLICK = "Normal"  # single click: the button's own Back / Forward
 DO_NOTHING = "Do Nothing"
+HOLD_GESTURES = "Gestures"  # hold and move the mouse
+HOLD_PRECISION = "Precision Mode"  # slower pointer while held
 OPEN_PROGRAM = "Open Program..."
 SHORTCUT = "Keyboard Shortcut"
 
@@ -101,8 +109,9 @@ WHEEL_PRESETS = {
 # Choices for a side-button click or double click, in menu order.
 BUTTON_ACTIONS = [
     "Back", "Forward", "Play / Pause", "Next Track", "Previous Track", "Mute",
-    "Task View", "Show Desktop", "Screenshot", "Alt + Tab", "Copy", "Paste",
-    "Calculator", "File Explorer", "Spotify", DO_NOTHING,
+    "Task View", "Show Desktop", "Next Desktop", "Previous Desktop",
+    "Maximize Window", "Minimize Window", "Screenshot", "Task Manager",
+    "Alt + Tab", "Copy", "Paste", "Calculator", "File Explorer", "Spotify", DO_NOTHING,
 ]
 
 ALLOWED_PROGRAM_SUFFIXES = {".exe", ".lnk"}

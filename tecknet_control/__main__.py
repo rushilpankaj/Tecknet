@@ -34,7 +34,6 @@ def main(args=None):
 
     setup_logging(debug="--debug" in args)
     logging.getLogger(__name__).info("Tecknet Control %s starting", __version__)
-    system.clean_up_v16()
 
     from .app import App
     from .input_hook import InputThread

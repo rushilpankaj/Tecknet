@@ -28,7 +28,9 @@ RIDI_DEVICENAME = 0x20000007
 RIDEV_INPUTSINK = 0x00000100
 RIM_TYPEMOUSE = 0
 RI_MOUSE_BUTTON_4_DOWN = 0x0040
+RI_MOUSE_BUTTON_4_UP = 0x0080
 RI_MOUSE_BUTTON_5_DOWN = 0x0100
+RI_MOUSE_BUTTON_5_UP = 0x0200
 RI_MOUSE_HWHEEL = 0x0800
 
 INPUT_MOUSE = 0
@@ -193,6 +195,67 @@ _declare(user32.TranslateMessage, [ctypes.POINTER(wintypes.MSG)], wintypes.BOOL)
 _declare(user32.DispatchMessageW, [ctypes.POINTER(wintypes.MSG)], LRESULT)
 _declare(user32.PostQuitMessage, [ctypes.c_int], None)
 _declare(user32.GetCursorPos, [ctypes.POINTER(POINT)], wintypes.BOOL)
+
+
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+SPI_GETMOUSESPEED = 0x0070
+SPI_SETMOUSESPEED = 0x0071
+WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+_declare(user32.GetForegroundWindow, [], wintypes.HWND)
+_declare(user32.GetWindowThreadProcessId, [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD)
+_declare(user32.IsWindowVisible, [wintypes.HWND], wintypes.BOOL)
+_declare(user32.GetWindowTextLengthW, [wintypes.HWND], ctypes.c_int)
+_declare(user32.EnumWindows, [WNDENUMPROC, wintypes.LPARAM], wintypes.BOOL)
+_declare(user32.SystemParametersInfoW, [wintypes.UINT, wintypes.UINT, wintypes.LPVOID, wintypes.UINT], wintypes.BOOL)
+_declare(kernel32.OpenProcess, [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE)
+_declare(kernel32.QueryFullProcessImageNameW, [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)], wintypes.BOOL)
+_declare(kernel32.CloseHandle, [wintypes.HANDLE], wintypes.BOOL)
+
+
+def window_program(window):
+    """File name, in lower case, of the program that owns a window ("" if unknown)."""
+    if not window:
+        return ""
+    pid = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(window, ctypes.byref(pid))
+    process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+    if not process:
+        return ""
+    try:
+        size = wintypes.DWORD(1024)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(process, 0, buffer, ctypes.byref(size)):
+            return ""
+        return buffer.value.rsplit("\\", 1)[-1].lower()
+    finally:
+        kernel32.CloseHandle(process)
+
+
+def open_window_programs():
+    """Programs that have a visible window with a title, sorted by name."""
+    found = set()
+
+    def visit(window, _):
+        if user32.IsWindowVisible(window) and user32.GetWindowTextLengthW(window) > 0:
+            name = window_program(window)
+            if name.endswith(".exe"):
+                found.add(name)
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(visit), 0)
+    return sorted(found)
+
+
+def pointer_speed():
+    speed = ctypes.c_int(10)
+    user32.SystemParametersInfoW(SPI_GETMOUSESPEED, 0, ctypes.byref(speed), 0)
+    return speed.value
+
+
+def set_pointer_speed(speed):
+    """Change the pointer speed (1-20) for this session only; never saved."""
+    user32.SystemParametersInfoW(SPI_SETMOUSESPEED, 0, ctypes.c_void_p(max(1, min(20, speed))), 0)
 
 
 def raw_device_name(handle):

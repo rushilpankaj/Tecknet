@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.8.0
+
+- App profiles: the side wheel can do something else in each program
+  (for example tabs in Chrome, volume everywhere else).
+- Hold a side button: run an action, slow the pointer down while held
+  (Precision mode), or use Gestures (hold and move left, right, up or down).
+- Volume moves faster when the side wheel is turned quickly.
+- New actions: Next / Previous Desktop, Maximize / Minimize Window, Task Manager.
+- Window: more room inside the cards, Fast / Slow marks on the double-click
+  wait, shorter highlight when a side button is pressed.
+- Simpler code: the v1.6 AutoHotkey clean-up and settings conversion are gone
+  (settings from 1.7 keep working), each card has its own file, and a
+  CONTRIBUTING guide explains where to change things.
+
 ## 1.7.0
 
 - AutoHotkey is no longer needed: the app handles the mouse itself.

@@ -21,7 +21,10 @@ BUTTON_PLACES = {1: "Rear side button", 2: "Front side button"}
 NORMAL_LABELS = {1: "Back (normal)", 2: "Forward (normal)"}
 OPEN_APP_LABEL = "Open app…"
 SHORTCUT_LABEL = "Keyboard shortcut…"
-FLASH_MS = 700
+FLASH_MS = 300
+KIND_NAMES = {"click": "click", "double": "double click", "hold": "hold"}
+GESTURE_NAMES = {"left": "Move left", "right": "Move right", "up": "Move up", "down": "Move down"}
+HOLD_LABELS = {actions.DO_NOTHING: "Nothing", actions.HOLD_GESTURES: "Gestures", actions.HOLD_PRECISION: "Precision mode"}
 
 
 class ControlsPanel:
@@ -48,12 +51,17 @@ class ControlsPanel:
         self.wheel_menu.set(self.settings["wheel_preset"])
         row.place(self.wheel_menu)
 
+        row = SettingRow(card, "Faster when turned quickly", tk.StringVar(value="Volume moves up to 3 steps per notch"))
+        self.accelerate_var = tk.BooleanVar(value=self.settings["wheel_acceleration"])
+        accelerate = ctk.CTkSwitch(card, text="", width=46, variable=self.accelerate_var, command=self.on_wheel_change, **theme.switch_style())
+        row.place(accelerate)
+
         row = SettingRow(card, "Reverse direction")
         self.invert_var = tk.BooleanVar(value=self.settings["invert_wheel"])
         invert = ctk.CTkSwitch(card, text="", width=46, variable=self.invert_var, command=self.on_wheel_change, **theme.switch_style())
         row.place(invert)
         card.finish()
-        self.widgets += [self.wheel_menu, invert]
+        self.widgets += [self.wheel_menu, accelerate, invert]
         self.update_wheel_notes()
 
     def update_wheel_notes(self):
@@ -67,6 +75,7 @@ class ControlsPanel:
     def on_wheel_change(self):
         self.settings["wheel_preset"] = self.wheel_menu.get()
         self.settings["invert_wheel"] = bool(self.invert_var.get())
+        self.settings["wheel_acceleration"] = bool(self.accelerate_var.get())
         self.update_wheel_notes()
         if self.app.save(f"✓ Side wheel: {self.settings['wheel_preset']}"):
             self.app.apply_controls()
@@ -77,10 +86,10 @@ class ControlsPanel:
         card.pack(fill="x", pady=(0, theme.GAP))
         SectionLabel(card, "Click")
         for button in (1, 2):
-            self.add_slot_row(card, button, f"{button}_click")
+            self.add_button_row(card, button, f"{button}_click")
         SectionLabel(card, "Double click")
         for button in (1, 2):
-            self.add_slot_row(card, button, f"{button}_double")
+            self.add_button_row(card, button, f"{button}_double")
 
         self.wait_note = tk.StringVar()
         row = SettingRow(card, "Double-click wait", self.wait_note)
@@ -96,18 +105,38 @@ class ControlsPanel:
         self.speed_label.pack(side="left", padx=(6, 0))
         slider.bind("<ButtonRelease-1>", lambda _event: self.on_speed_release())
         row.place(holder)
-        card.finish()
+        marks = ctk.CTkFrame(card, fg_color="transparent", width=168, height=16)
+        marks.pack_propagate(False)
+        for text, side in (("Fast", "left"), ("Slow", "right")):
+            ctk.CTkLabel(marks, text=text, font=theme.font(11), text_color=theme.MUTED, height=14).pack(side=side)
+        marks.grid(row=card.row(), column=2, sticky="e", padx=(0, theme.PAD + 62))
         self.widgets.append(slider)
         self.update_wait_note()
 
-    def add_slot_row(self, card, button, slot):
+        SectionLabel(card, "Hold", "about half a second")
+        for button in (1, 2):
+            self.add_button_row(card, button, f"{button}_hold")
+        SectionLabel(card, "Gestures", "hold a button set to Gestures and move the mouse")
+        for direction, label in GESTURE_NAMES.items():
+            row = SettingRow(card, label)
+            self.add_menu(card, row, f"gesture_{direction}")
+        card.finish()
+
+    def add_button_row(self, card, button, slot):
         row = SettingRow(card, BUTTON_NAMES[button], tk.StringVar(value=BUTTON_PLACES[button]))
         self.button_rows[button].append(card.grid_slaves(row=row.row, column=0)[0])
-        choices = [(a, a) for a in actions.BUTTON_ACTIONS]
-        if config.slot_kind(slot) == "click":
-            choices = [(NORMAL_LABELS[button], actions.NORMAL_CLICK)] + [c for c in choices if c[1] != actions.DO_NOTHING] + [(actions.DO_NOTHING, actions.DO_NOTHING)]
+        self.add_menu(card, row, slot)
+
+    def add_menu(self, card, row, slot):
+        kind = config.slot_kind(slot)
+        others = [(a, a) for a in actions.BUTTON_ACTIONS if a != actions.DO_NOTHING]
+        nothing = (actions.DO_NOTHING, actions.DO_NOTHING)
+        if kind == "click":
+            choices = [(NORMAL_LABELS[int(slot[0])], actions.NORMAL_CLICK)] + others + [nothing]
+        elif kind == "hold":
+            choices = [(HOLD_LABELS[a], a) for a in HOLD_LABELS] + others
         else:
-            choices = [(actions.DO_NOTHING, actions.DO_NOTHING)] + [c for c in choices if c[1] != actions.DO_NOTHING]
+            choices = [nothing] + others
         choices += [(OPEN_APP_LABEL, actions.OPEN_PROGRAM), (SHORTCUT_LABEL, actions.SHORTCUT)]
         menu = ActionMenu(
             card, choices, specials={actions.OPEN_PROGRAM, actions.SHORTCUT},
@@ -124,6 +153,8 @@ class ControlsPanel:
         action = data["action"]
         if action == actions.NORMAL_CLICK:
             return NORMAL_LABELS[int(slot[0])]
+        if config.slot_kind(slot) == "hold" and action in HOLD_LABELS:
+            return HOLD_LABELS[action]
         if action == actions.OPEN_PROGRAM:
             return f"Open {data.get('program_name') or 'app'}"
         if action == actions.SHORTCUT:
@@ -135,9 +166,12 @@ class ControlsPanel:
 
     def set_slot(self, slot, data):
         self.settings["buttons"][slot] = data
-        button = int(slot[0])
-        kind = "click" if config.slot_kind(slot) == "click" else "double click"
-        if self.app.save(f"✓ {BUTTON_NAMES[button]} {kind}: {self.slot_text(slot, data)}"):
+        kind = config.slot_kind(slot)
+        if kind == "gesture":
+            title = f"Gesture {GESTURE_NAMES[slot.split('_')[1]].lower()}"
+        else:
+            title = f"{BUTTON_NAMES[int(slot[0])]} {KIND_NAMES[kind]}"
+        if self.app.save(f"✓ {title}: {self.slot_text(slot, data)}"):
             self.app.apply_controls()
         self.show_slot(slot)
         self.update_wait_note()
@@ -158,9 +192,10 @@ class ControlsPanel:
 
     # --- double-click wait ---------------------------------------------------------
     def on_speed_move(self, value):
-        self.speed_label.configure(text=f"{int(value)} ms")
+        self.speed_label.configure(text=f"{int(value)} ms", text_color=theme.ACCENT)
 
     def on_speed_release(self):
+        self.speed_label.configure(text_color=theme.TEXT)
         self.settings["double_click_ms"] = int(self.speed_var.get())
         self.update_wait_note()
         if self.app.save(f"✓ Double-click wait {self.settings['double_click_ms']} ms"):

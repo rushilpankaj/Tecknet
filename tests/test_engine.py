@@ -1,7 +1,8 @@
 import unittest
 
 from tecknet_control.engine import (
-    BLOCK, DOUBLE_TIMER, FLUSH_TIMER, PASS, PENDING_TIMEOUT, EngineConfig, InputEngine,
+    BLOCK, DOUBLE_TIMER, FLUSH_TIMER, GESTURES, HOLD_TIMER, PASS, PENDING_TIMEOUT, PRECISION,
+    EngineConfig, InputEngine, gesture_direction,
 )
 
 VOLUME = ("Volume Down", "Volume Up")
@@ -11,6 +12,14 @@ class FakeHost:
     def __init__(self):
         self.timers = {}
         self.effects = []
+        self.app = "explorer.exe"
+        self.precision_calls = []
+
+    def foreground_app(self):
+        return self.app
+
+    def precision(self, on):
+        self.precision_calls.append(on)
 
     def set_timer(self, timer_id, ms):
         self.timers[timer_id] = ms
@@ -37,6 +46,11 @@ class EngineTest(unittest.TestCase):
             send_wheel=lambda delta: self.done.append(("wheel", delta)),
             send_click=lambda button: self.done.append(("click", button)),
         )
+
+    def tilt(self, delta, now):
+        """The TECKNET side wheel: Raw Input names the device, then the hook sees it."""
+        self.engine.on_raw_wheel(from_target=True, now=now)
+        return self.engine.on_hook_wheel(delta, now)
 
     def configure(self, **changes):
         values = dict(enabled=True, wheel=VOLUME, target_ids=frozenset({"25A7:FA61"}))
@@ -105,15 +119,9 @@ class EngineTest(unittest.TestCase):
         self.host.run()
         self.assertEqual(self.done, [("wheel", 120)])
 
-    def test_all_devices_mode_acts_immediately(self):
-        self.configure(only_target_devices=False)
-        self.assertEqual(self.engine.on_hook_wheel(120, 0.0), BLOCK)
-        self.host.run()
-        self.assertEqual(self.done, [("action", "Volume Up")])
-
     def test_invert_wheel(self):
-        self.configure(only_target_devices=False, invert_wheel=True)
-        self.engine.on_hook_wheel(120, 0.0)
+        self.configure(invert_wheel=True)
+        self.tilt(120, 0.0)
         self.host.run()
         self.assertEqual(self.done, [("action", "Volume Down")])
 
@@ -164,6 +172,97 @@ class EngineTest(unittest.TestCase):
         self.engine.on_double_timer(1)
         self.host.run()
         self.assertEqual(self.done, [("action", ("Mute", ""))])
+
+    # --- app profiles and acceleration --------------------------------------
+    def test_app_profile_changes_the_wheel(self):
+        self.configure(wheel_by_app={"chrome.exe": ("Previous Tab", "Next Tab"), "game.exe": None})
+        self.host.app = "chrome.exe"
+        self.tilt(120, 0.0)
+        self.host.app = "game.exe"
+        self.assertEqual(self.engine.on_hook_wheel(120, 1.0), PASS)  # normal scroll there
+        self.host.app = "notepad.exe"
+        self.tilt(120, 2.0)
+        self.host.run()
+        self.assertEqual(self.done, [("action", "Next Tab"), ("action", "Volume Up")])
+
+    def test_profile_alone_turns_the_wheel_on(self):
+        self.configure(wheel=None, wheel_by_app={"chrome.exe": ("Previous Tab", "Next Tab")})
+        self.assertTrue(self.engine.wheel_active())
+        self.assertEqual(self.engine.on_hook_wheel(120, 0.0), PASS)  # not in Chrome
+
+    def test_fast_turns_repeat_accelerated_actions(self):
+        self.configure(accelerated=frozenset({"Volume Up"}))
+        for now in (0.0, 0.03, 0.10, 1.0):
+            self.tilt(120, now)
+        self.host.run()
+        self.assertEqual([a for _, a in self.done], ["Volume Up"] * (1 + 3 + 2 + 1))
+
+    # --- hold, gestures, precision -----------------------------------------
+    def test_short_press_with_hold_action_is_a_click(self):
+        self.configure(hold={1: "Task Manager", 2: None}, double_click={1: None, 2: None})
+        self.assertEqual(self.engine.on_button_down(1, (0, 0)), BLOCK)
+        self.assertEqual(self.engine.on_button_up(1, (0, 0)), BLOCK)
+        self.host.run()
+        self.assertEqual(self.done, [("click", 1)])
+
+    def test_long_press_runs_hold_action_once(self):
+        self.configure(hold={1: "Task Manager", 2: None})
+        self.engine.on_button_down(1, (0, 0))
+        self.assertIn(HOLD_TIMER[1], self.host.timers)
+        self.engine.on_hold_timer(1)
+        self.engine.on_button_up(1, (0, 0))
+        self.host.run()
+        self.assertEqual(self.done, [("action", "Task Manager")])
+
+    def test_hold_then_double_click_still_works(self):
+        self.configure(hold={1: "Task Manager", 2: None}, double_click={1: "Calculator", 2: None})
+        for _ in range(2):
+            self.engine.on_button_down(1, (0, 0))
+            self.engine.on_button_up(1, (0, 0))
+        self.host.run()
+        self.assertEqual(self.done, [("action", "Calculator")])
+
+    def test_gestures(self):
+        gestures = {"left": "Prev", "right": "Next", "up": "Max", "down": None}
+        self.configure(hold={1: GESTURES, 2: None}, gestures=gestures)
+        for end in ((120, 10), (-80, 0), (5, -90), (0, 90)):
+            self.engine.on_button_down(1, (0, 0))
+            self.assertEqual(self.engine.on_button_up(1, end), BLOCK)
+        self.engine.on_button_down(1, (0, 0))
+        self.engine.on_button_up(1, (10, 5))  # barely moved: a normal click
+        self.host.run()
+        self.assertEqual(self.done, [("action", "Next"), ("action", "Prev"), ("action", "Max"), ("click", 1)])
+
+    def test_precision_while_held(self):
+        self.configure(hold={1: None, 2: PRECISION})
+        self.engine.on_button_down(2, (0, 0))
+        self.engine.on_hold_timer(2)
+        self.host.run()
+        self.assertEqual(self.host.precision_calls, [True])
+        self.engine.on_button_up(2, (0, 0))
+        self.host.run()
+        self.assertEqual(self.host.precision_calls, [True, False])
+        self.assertEqual(self.done, [])
+
+    def test_turning_off_restores_precision(self):
+        self.configure(hold={1: PRECISION, 2: None})
+        self.engine.on_button_down(1, (0, 0))
+        self.engine.on_hold_timer(1)
+        self.configure(enabled=False)
+        self.assertEqual(self.host.precision_calls, [True, False])
+
+    def test_lost_release_turns_precision_off(self):
+        self.configure(hold={1: PRECISION, 2: None})
+        self.engine.on_button_down(1, (0, 0))
+        self.engine.on_hold_timer(1)
+        self.engine.cancel_holds()
+        self.host.run()
+        self.assertEqual(self.host.precision_calls, [True, False])
+        self.assertEqual(self.engine.on_button_up(1, (0, 0)), PASS)  # late release is harmless
+
+    def test_gesture_direction(self):
+        self.assertIsNone(gesture_direction((0, 0), (30, -30)))
+        self.assertEqual(gesture_direction((100, 100), (100, 300)), "down")
 
     def test_turning_off_while_waiting_sends_the_click(self):
         self.configure(double_click={1: ("Calculator", ""), 2: None})

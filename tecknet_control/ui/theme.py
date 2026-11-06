@@ -22,7 +22,7 @@ BATTERY_LOW = ("#F59E0B", "#FBBF24")
 
 FONT_FAMILY = "Segoe UI"
 RADIUS = 12
-PAD = 18  # inside cards
+PAD = 20  # inside cards
 GAP = 12  # between cards
 
 MENU_WIDTH = 230

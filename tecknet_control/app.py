@@ -1,8 +1,10 @@
-"""Main window: header with the on/off switch, mouse status, controls, app settings.
+"""Main window: puts the cards together and connects them to the rest.
 
 Every change is saved and applied at once; confirmations appear in the line
-at the bottom of the window, never in pop-ups. The look (colours, fonts) is
-in ui/theme.py; the side wheel and side button cards in ui/controls_panel.py.
+at the bottom of the window, never in pop-ups. Where things are:
+- look (colours, fonts, spacing): ui/theme.py
+- cards: ui/mouse_card.py, ui/controls_panel.py (side wheel and buttons),
+  ui/profiles_panel.py (app profiles), ui/app_card.py (app settings)
 """
 
 import logging
@@ -17,16 +19,16 @@ from . import __version__, config, devices, system
 from .icons import app_icon
 from .tray import Tray
 from .ui import theme
+from .ui.app_card import AppCard
 from .ui.controls_panel import ControlsPanel
-from .ui.widgets import Card, SettingRow
+from .ui.mouse_card import LOW_BATTERY, MouseCard
+from .ui.profiles_panel import ProfilesPanel
 
 log = logging.getLogger(__name__)
 
-VISIBLE_REFRESH_MS = 5000
-TRAY_REFRESH_MS = 15000
-LOW_BATTERY = 15
-LOW_BATTERY_RESET = 25
-IDENTIFY_TIMEOUT_MS = 15000
+VISIBLE_REFRESH_MS = 5000  # how often the mouse status is read with the window open
+TRAY_REFRESH_MS = 15000  # and with the app in the tray
+LOW_BATTERY_RESET = 25  # warn again only after the battery went back above this
 
 
 def resource(name):
@@ -52,7 +54,6 @@ class App(ctk.CTk):
 
         self.feedback_after_id = None
         self.refresh_after_id = None
-        self.identify_after_id = None
         self.refresh_running = False
         self.low_battery_warned = False
 
@@ -75,9 +76,10 @@ class App(ctk.CTk):
         content.pack(fill="both", expand=True, padx=(16, 6), pady=(4, 0))
         # CustomTkinter scrolls 20 px per wheel notch on Windows; make it 80.
         content._parent_canvas.configure(yscrollincrement=4)
-        self.build_device(content)
+        self.mouse = MouseCard(content)
         self.controls = ControlsPanel(self, content)
-        self.build_app_settings(content)
+        self.profiles = ProfilesPanel(self, content)
+        self.app_card = AppCard(self, content)
         self.controls.set_enabled(self.settings["enable_controls"])
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
@@ -105,56 +107,9 @@ class App(ctk.CTk):
         ctk.CTkSwitch(switch_box, text="", width=46, variable=self.enable_var, command=self.toggle_controls, **theme.switch_style()).pack(side="left", padx=(0, 8))
         self.update_enable_text()
 
-    def build_device(self, parent):
-        card = Card(parent, "Mouse")
-        card.pack(fill="x", pady=(0, theme.GAP))
-        self.status_var = tk.StringVar(value="Checking…")
-        self.detail_var = tk.StringVar(value="")
-        self.battery_var = tk.StringVar(value="")
-        row = card.row()
-        status = ctk.CTkFrame(card, fg_color="transparent")
-        status.grid(row=row, column=0, columnspan=2, sticky="w", padx=theme.PAD, pady=(0, 4))
-        self.dot = ctk.CTkLabel(status, text="●", font=theme.font(16), text_color=theme.IDLE)
-        self.dot.pack(side="left", padx=(0, 8))
-        texts = ctk.CTkFrame(status, fg_color="transparent")
-        texts.pack(side="left")
-        ctk.CTkLabel(texts, textvariable=self.status_var, font=theme.font(14, "bold"), text_color=theme.TEXT).pack(anchor="w")
-        ctk.CTkLabel(texts, textvariable=self.detail_var, font=theme.font(12), text_color=theme.MUTED).pack(anchor="w")
-        battery = ctk.CTkFrame(card, fg_color="transparent")
-        battery.grid(row=row, column=2, sticky="e", padx=theme.PAD)
-        self.battery_label = ctk.CTkLabel(battery, textvariable=self.battery_var, font=theme.font(22, "bold"), text_color=theme.TEXT)
-        self.battery_label.pack(anchor="e")
-        self.battery_bar = ctk.CTkProgressBar(battery, width=120, height=6, progress_color=theme.SUCCESS, fg_color=theme.FIELD)
-        self.battery_bar.pack(anchor="e", pady=(2, 0))
-        self.battery_bar.set(0)
-        self.battery_bar.pack_forget()
-        card.finish()
-
-    def build_app_settings(self, parent):
-        card = Card(parent, "App")
-        card.pack(fill="x", pady=(0, theme.GAP))
-        self.start_var = tk.BooleanVar(value=self.settings["start_with_windows"])
-        self.tray_var = tk.BooleanVar(value=self.settings["minimize_to_tray"])
-        self.battery_alert_var = tk.BooleanVar(value=self.settings["low_battery_alert"])
-        switches = (
-            ("Start with Windows", "Opens in the tray when you sign in", self.start_var),
-            ("Keep running when closed", "Controls keep working from the tray", self.tray_var),
-            ("Low battery notification", f"At {LOW_BATTERY}% or less", self.battery_alert_var),
-        )
-        for label, note, variable in switches:
-            row = SettingRow(card, label, tk.StringVar(value=note))
-            row.place(ctk.CTkSwitch(card, text="", width=46, variable=variable, command=self.update_app_settings, **theme.switch_style()))
-        row = SettingRow(card, "Theme")
-        self.theme_menu = ctk.CTkOptionMenu(card, values=list(config.THEMES), command=self.change_theme, **{**theme.menu_style(), "width": 140})
-        self.theme_menu.set(self.settings["theme"])
-        row.place(self.theme_menu)
-        # Only needed with a mouse that is not a TK-MS029.
-        row = SettingRow(card, "Use another mouse", tk.StringVar(value="Press, then tilt its side wheel"))
-        row.place(ctk.CTkButton(card, text="Add mouse", width=110, command=self.identify_mouse, **theme.button_style()))
-        card.finish()
-
     # --- settings -------------------------------------------------------------
     def save(self, message):
+        """Save self.settings, reload them checked, and confirm in the window."""
         try:
             config.save_settings(self.settings)
         except OSError as error:
@@ -177,51 +132,14 @@ class App(ctk.CTk):
         if self.save("✓ Custom controls on" if enabled else "✓ Normal mouse: horizontal scroll, Back and Forward"):
             self.apply_controls()
         self.controls.set_enabled(enabled)
+        self.profiles.set_enabled(enabled)
         self.update_enable_text()
 
     def set_controls_enabled(self, enabled):
         self.enable_var.set(enabled)
         self.toggle_controls()
 
-    def update_app_settings(self):
-        self.settings["start_with_windows"] = bool(self.start_var.get())
-        self.settings["minimize_to_tray"] = bool(self.tray_var.get())
-        self.settings["low_battery_alert"] = bool(self.battery_alert_var.get())
-        if not system.set_startup(self.settings["start_with_windows"]):
-            self.show_feedback("Could not change Start with Windows", error=True)
-            return
-        self.save("✓ Settings saved")
-
-    def change_theme(self, name):
-        self.settings["theme"] = name
-        ctk.set_appearance_mode(name)
-        self.save(f"✓ {name} theme")
-
-    # --- identify mouse ----------------------------------------------------------
-    def identify_mouse(self):
-        self.show_feedback("Tilt the side wheel or press a side button on the mouse…", persist=True)
-        self.input.identify_callback = lambda identifier, kind: self.after(0, lambda: self.identified(identifier))
-        if self.identify_after_id:
-            self.after_cancel(self.identify_after_id)
-        self.identify_after_id = self.after(IDENTIFY_TIMEOUT_MS, self.identify_timeout)
-
-    def identified(self, identifier):
-        if self.identify_after_id:
-            self.after_cancel(self.identify_after_id)
-            self.identify_after_id = None
-        if identifier in self.settings["device_ids"]:
-            self.show_feedback(f"✓ This mouse is already recognised ({identifier})")
-            return
-        self.settings["device_ids"] = self.settings["device_ids"] + [identifier]
-        if self.save(f"✓ Mouse added ({identifier})"):
-            self.apply_controls()
-
-    def identify_timeout(self):
-        self.identify_after_id = None
-        self.input.identify_callback = None
-        self.show_feedback("No mouse input received", error=True)
-
-    # --- feedback ------------------------------------------------------------------
+    # --- feedback line --------------------------------------------------------
     def show_feedback(self, text, error=False, persist=False):
         if self.feedback_after_id:
             self.after_cancel(self.feedback_after_id)
@@ -235,7 +153,7 @@ class App(ctk.CTk):
         self.feedback_after_id = None
         self.feedback_var.set("")
 
-    # --- device ----------------------------------------------------------------------
+    # --- mouse status (read in the background, shown here) --------------------
     def refresh_device(self):
         if self.refresh_after_id:
             self.after_cancel(self.refresh_after_id)
@@ -256,27 +174,10 @@ class App(ctk.CTk):
 
     def show_device(self, state):
         self.refresh_running = False
-        if not state.connected:
-            self.status_var.set("Not connected")
-            self.detail_var.set("Turn the mouse on or move it to wake it up")
-        elif state.connection == "Bluetooth":
-            self.status_var.set("Connected")
-            self.detail_var.set(f"Bluetooth · {state.name}")
-        else:
-            self.status_var.set("Connected")
-            self.detail_var.set("2.4 GHz USB receiver · battery level not reported")
-        self.dot.configure(text_color=theme.SUCCESS if state.connected else theme.IDLE)
-        if state.battery is None:
-            self.battery_var.set("")
-            self.battery_bar.pack_forget()
-        else:
-            level = max(0, min(100, state.battery))
-            self.battery_var.set(f"{level}%")
-            self.battery_bar.configure(progress_color=theme.BATTERY_LOW if level <= LOW_BATTERY else theme.SUCCESS)
-            self.battery_bar.set(level / 100)
-            self.battery_bar.pack(anchor="e", pady=(2, 0))
-            self.check_low_battery(level)
+        self.mouse.show(state)
         self.tray.show_state(state)
+        if state.battery is not None:
+            self.check_low_battery(state.battery)
         interval = TRAY_REFRESH_MS if self.state() == "withdrawn" else VISIBLE_REFRESH_MS
         self.refresh_after_id = self.after(interval, self.refresh_device)
 
@@ -287,7 +188,7 @@ class App(ctk.CTk):
             self.low_battery_warned = True
             self.tray.notify("TK-MS029 battery low", f"{battery}% left. Charge the mouse soon.")
 
-    # --- window ------------------------------------------------------------------------
+    # --- window ---------------------------------------------------------------
     def show_app(self):
         self.deiconify()
         self.lift()
@@ -295,7 +196,7 @@ class App(ctk.CTk):
         self.refresh_device()
 
     def on_close(self):
-        if self.tray_var.get():
+        if self.settings["minimize_to_tray"]:
             self.withdraw()
         else:
             self.exit_app()
